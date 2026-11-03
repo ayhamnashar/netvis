@@ -9,7 +9,7 @@ const path = props.path
 const bus = controller.bus
 const err = ref([])
 
-let onSelect, onUnselect, onCxttap, onMouseover, onMouseout, showErr
+let onSelect, onUnselect, onCxttap, onMouseover, onMouseout, onDbltap, showErr
 
 onMounted(() => {
   cy.mount(document.getElementById("cy"))
@@ -46,6 +46,13 @@ onMounted(() => {
     controller.nodeCxtTap(e.target)
   })
 
+  cy.on('dbltap', 'node', onDbltap = e => {
+    const node = e.target
+    if (node.data("type") === "area") {
+      controller.expandArea(node)
+    }
+  })
+
   cy.on("mouseover", "node, edge", onMouseover = e => {
     controller.elementMouseover(e.target)
   })
@@ -59,6 +66,7 @@ onBeforeUnmount(() => {
   cy.removeListener('select', onSelect)
   cy.removeListener('unselect', onUnselect)
   cy.removeListener('cxttap', onCxttap)
+  cy.removeListener('dbltap', onDbltap)
   cy.removeListener('mouseover', onMouseover)
   cy.removeListener('mouseout', onMouseout)
   bus.removeListener('showErr', showErr)

@@ -5,10 +5,77 @@ class Controller {
     constructor({ cy }) {
         this.cy = cy
         this.bus = new EventEmitter()
+        // Cache of areaId -> child areaIds as provided by the backend.
+        // Used to collapse parent areas efficiently even if nested areas were expanded.
+        this.areaChildrenCache = new Map()
+        // Cache of raw area objects fetched from the backend.
+        this.areaDataCache = new Map()
+        // areaId -> child areaIds, derived from the in_area links of all
+        // areas. Built lazily for backend data that doesn't provide
+        // child_areas (older exports, hand-written topologies).
+        this.areaHierarchy = null
         this.options = {
             autolayout: true,
             autoselect: true
         }
+    }
+
+    /**
+     * Return child areas for an areaId.
+     * Uses the child_areas reported by the backend and, as a fallback,
+     * derives them from the in_area links of all areas fetched from the
+     * backend. Falls back to fetching the area from the backend if needed.
+     * @param {string} areaId
+     * @returns {Promise<string[]>}
+     */
+    async getChildAreas(areaId) {
+        const hierarchy = await this.getAreaHierarchy()
+        const fromHierarchy = hierarchy.get(areaId) || []
+        const fromData = this.areaChildrenCache.get(areaId) || []
+        // Deduplicate while keeping the backend-provided order first.
+        return [...new Set([...fromData, ...fromHierarchy])]
+    }
+
+    /**
+     * Build (once) a map of areaId -> child areaIds from the in_area links
+     * of every area known to the backend. This makes netvis work with
+     * backend data that doesn't include child_areas, e.g. hand-written
+     * topologies or exports from older Netspoc versions.
+     * @returns {Promise<Map<string, string[]>>}
+     */
+    async getAreaHierarchy() {
+        if (this.areaHierarchy) {
+            return this.areaHierarchy
+        }
+        const hierarchy = new Map()
+        let names = []
+        try {
+            names = await this.getAllAreas()
+        } catch {
+            names = []
+        }
+        await Promise.all((names || []).map(async (name) => {
+            let areaData = this.areaDataCache.get(name)
+            if (!areaData) {
+                try {
+                    areaData = await this.getDataFromBackend(name, false)
+                    this.areaDataCache.set(name, areaData)
+                } catch {
+                    // Do not cache failures: a transient backend error must
+                    // not permanently prevent the hierarchy from resolving.
+                    return
+                }
+            }
+            this.areaChildrenCache.set(name, areaData.child_areas || [])
+            if (areaData.in_area) {
+                if (!hierarchy.has(areaData.in_area)) {
+                    hierarchy.set(areaData.in_area, [])
+                }
+                hierarchy.get(areaData.in_area).push(name)
+            }
+        }))
+        this.areaHierarchy = hierarchy
+        return hierarchy
     }
 
     undo() {
@@ -71,15 +138,36 @@ class Controller {
     }
 
     selectedNeighbors() {
-        this.cy.elements(':selected').forEach(s => this.showAllNeighbors(s.data("neighbors")))
+        this.cy.elements(':selected').forEach(s => this.showAllNeighbors(s.data("neighbors"), s.data("v6")))
     }
 
-    showAllNeighbors(neighbors) {
-        if ( neighbors ) {
-            let neigh = []
-            neighbors.filter(n => !n.id.startsWith("area:")).forEach(n => neigh.push(n))
-            this.showNode(neigh, false)
-        }
+    async showAllNeighbors(neighbors, v6) {
+        if ( !neighbors ) return
+        let neigh = []
+        let areas = []
+        neighbors.forEach(n => {
+            if ( typeof n === "string" ) {
+                // Area nodes report their neighbors as plain id strings.
+                // Areas are loaded as collapsed area nodes, everything else
+                // (networks, routers) as regular nodes.
+                if ( n.startsWith("area:") ) {
+                    areas.push(n)
+                } else {
+                    neigh.push({ id: n })
+                }
+            } else if ( n && n.id && n.id.startsWith("area:") ) {
+                areas.push(n.id)
+            } else if ( n && n.id ) {
+                neigh.push(n)
+            }
+        })
+        const nodeCount = this.cy.elements().length
+        if ( neigh.length > 0 ) await this.showNode(neigh, v6)
+        for ( const a of areas ) await this.loadArea(a)
+        // showNode runs a layout internally, but areas loaded afterwards pile
+        // up at the origin. Run a layout once all neighbors are on the canvas.
+        if ( areas.length > 0 && this.cy.elements().length !== nodeCount && this.options.autolayout )
+            this.runLayout()
     }
 
     centerGraph() {
@@ -91,14 +179,18 @@ class Controller {
         if ( !node.data().neighbors )
             return
         node.data().neighbors.forEach((n) => {
-            if ( cy.getElementById(n.id).length === 1 && node.neighborhood().getElementById(n.id).length !== 1 ) {
+            // Area neighbors are plain strings ("area:name"), all other
+            // neighbors are objects ({ id, ... }).
+            const neighborId = typeof n === "string" ? n : n && n.id
+            if ( !neighborId ) return
+            if ( cy.getElementById(neighborId).length === 1 && node.neighborhood().getElementById(neighborId).length !== 1 ) {
                 let edgeCount = 1
                 if ( n.is_tunnel ) edgeCount = 2
                 for (let i = 0; i < edgeCount; i++) {
                     cy.add({
                         data: {
                             source: node.id(),
-                            target: n.id,
+                            target: neighborId,
                             is_tunnel: n.is_tunnel,
                         }
                     })
@@ -112,7 +204,7 @@ class Controller {
         let nodes = []
         Promise.resolve(pathNodes).then((res) => {
             res.forEach(node => nodes.push({ id: node }))
-            this.showNode(nodes.filter(n => !n.id.startsWith("network:tunnel") || !n.id.startsWith("interface:")), false)
+            this.showNode(nodes.filter(n => !n.id.startsWith("network:tunnel") && !n.id.startsWith("interface:")), false)
                 .then(() => {
                         this.runLayout()
                         this.cy.elements().unselect()
@@ -124,8 +216,8 @@ class Controller {
 
     showSingleNode(name, v6) {
         let nodeCount = this.cy.elements().length
-        Promise.resolve(this.addNode(name, v6)).then(() => {
-            if ( nodeCount !== this.cy.elements().length && this.options.autolayout )
+        Promise.resolve(this.addNode(name, v6)).then(areaRemoved => {
+            if ( (nodeCount !== this.cy.elements().length || areaRemoved) && this.options.autolayout )
                 this.runLayout()
         })
     }
@@ -145,15 +237,33 @@ class Controller {
         })
 
         return Promise.all(promises).then(() => {
+            let areaRemoved = false
+            nodesData.forEach(({ data }) => {
+                areaRemoved = this.removeCollapsedAreaForNode(data) || areaRemoved
+            })
             let addedNodes = cy.undoRedo().do("add", nodesData)
             addedNodes.forEach(node => {
                 this.connectMissingNeighbors(node)
+                // Ensure node is properly selectable
+                node.selectable(true)
+                node.grabbable(true)
             })
-            if ( nodeCount !== this.cy.elements().length && this.options.autolayout )
+            if ( (nodeCount !== this.cy.elements().length || areaRemoved) && this.options.autolayout )
                 this.runLayout()
             return true
         })
 
+    }
+
+    removeCollapsedAreaForNode(nodeData) {
+        const areaId = nodeData.in_area
+        if ( !areaId ) return false
+
+        const areaNode = this.cy.getElementById(areaId)
+        if ( areaNode.length === 0 || areaNode.data("type") !== "area" ) return false
+
+        this.cy.undoRedo().do("remove", areaNode)
+        return true
     }
 
     async addNode(name, v6) {
@@ -161,20 +271,23 @@ class Controller {
         const { cy } = this
         let elements = cy.getElementById(name)
         if ( elements.length === 1 ) {
+            const areaRemoved = this.removeCollapsedAreaForNode(elements[0].data())
             if ( this.options.autoselect ) this.nodeSelect(elements[0])
-            return
+            return areaRemoved
         }
+        
+        // Handle area nodes specially
+        if (name.startsWith("area:")) {
+            return this.loadArea(name)
+        }
+        
         return this.getDataFromBackend(name, v6).then(
             node => {
-                if ( node.type === "area" ) {
-                    return
-                    // node.children.forEach(child => {
-                    //     cy.remove(cy.getElementById(child))
-                    // })
-                }
+                const areaRemoved = this.removeCollapsedAreaForNode(node)
                 let addedNode = cy.undoRedo().do("add", { data: node })
                 this.connectMissingNeighbors(addedNode.element())
                 if ( this.options.autoselect ) this.nodeSelect(addedNode.element())
+                return areaRemoved
             }
         ).catch(
             err => {
@@ -253,10 +366,295 @@ class Controller {
     }
 
     nodeCxtTap(node) {
-        const { cy } = this;
-        node.select()
-        let selected = cy.elements(':selected')
-        cy.undoRedo().do("remove", selected)
+        const { cy } = this
+        const selected = cy.elements(':selected')
+        // A right click targets one object. Only remove other selected
+        // objects if the clicked node is part of an explicit multi-selection.
+        // Otherwise the node that was auto-selected by the last "add"
+        // operation would be removed together with the clicked object.
+        if ( node.selected() && selected.length > 1 ) {
+            cy.undoRedo().do("remove", selected)
+        } else {
+            cy.elements().unselect()
+            node.select()
+            cy.undoRedo().do("remove", node)
+        }
+    }
+
+    /**
+     * Get all available areas from backend
+     */
+    async getAllAreas() {
+        return await fetch("/netvis/backend/areas").then(async (res) => {
+            if (!res.ok) {
+                let text = await res.text()
+                throw text
+            }
+            return res.json()
+        }).catch(err => {
+            this.bus.emit('showErr', err)
+            return []
+        })
+    }
+
+    /**
+     * Load and display an area node by its ID
+     * @param {string} areaId - The area ID (e.g., "area:g17")
+     * @param {string} parentAreaId - Optional parent area ID if this is a child area
+     */
+    async loadArea(areaId, parentAreaId = null) {
+        const { cy } = this
+        
+        // Check if area already exists
+        if (cy.getElementById(areaId).length > 0) {
+            this.nodeSelect(cy.getElementById(areaId))
+            return cy.getElementById(areaId)
+        }
+
+        // Fetch area data from backend (or use the cached copy)
+        try {
+            let areaData = this.areaDataCache.get(areaId)
+            if (!areaData) {
+                areaData = await this.getDataFromBackend(areaId, false)
+                this.areaDataCache.set(areaId, areaData)
+            }
+            
+            // Prepare node data
+            const nodeData = { 
+                ...areaData, 
+                id: areaId,
+                type: "area",
+                label: areaId
+            }
+
+            // Boundary routers (from border/inclusive_border interfaces) are
+            // the routers connecting the area to neighboring areas. The
+            // backend already reports them for border-only areas, so only
+            // add the missing ones (e.g. routers behind inclusive borders)
+            // to avoid duplicates in the info panel, "zeige alle" and edges.
+            const boundaryRouters = []
+            const seenRouters = new Set()
+            ;[...(areaData.border || []), ...(areaData.inclusive_border || [])].forEach(intf => {
+                const m = /^interface:([^.]+)\./.exec(intf)
+                if ( !m ) return
+                const routerId = "router:" + m[1]
+                if ( seenRouters.has(routerId) ) return
+                seenRouters.add(routerId)
+                boundaryRouters.push({ id: routerId, neighbor_count: 1 })
+            })
+            if ( boundaryRouters.length > 0 ) {
+                // Skip boundary routers that are already reported by the backend.
+                const reported = new Set((nodeData.neighbors || []).map(n => typeof n === "string" ? n : n.id))
+                const extra = boundaryRouters.filter(br => !reported.has(br.id))
+                if ( extra.length > 0 ) {
+                    nodeData.neighbors = [...(nodeData.neighbors || []), ...extra]
+                }
+            }
+            
+            // If this is a child area, add parent area reference
+            if (parentAreaId) {
+                nodeData.in_area = parentAreaId
+            }
+
+            // Cache child areas for efficient collapse later. If the backend
+            // data doesn't provide child_areas, derive them from the in_area
+            // hierarchy so nested areas still show up when this area is opened.
+            let childAreas = nodeData.child_areas || []
+            if (childAreas.length === 0) {
+                const hierarchy = await this.getAreaHierarchy()
+                childAreas = hierarchy.get(areaId) || []
+                if (childAreas.length > 0) {
+                    nodeData.child_areas = childAreas
+                }
+            }
+            this.areaChildrenCache.set(areaId, childAreas)
+            
+            // Add area node to graph
+            const areaNode = cy.undoRedo().do("add", { 
+                data: nodeData
+            })
+            
+            // Draw edges to any neighbor areas already on the canvas.
+            this.connectMissingNeighbors(areaNode.element())
+            
+            cy.fit()
+            if (this.options.autoselect) {
+                this.nodeSelect(areaNode.element())
+            }
+            
+            return areaNode.element()
+        } catch (err) {
+            this.bus.emit('showErr', err)
+        }
+    }
+
+    /**
+     * Expand an area node to show all its member objects
+     * @param {Object} areaNode - The Cytoscape area node to expand
+     */
+    async expandArea(areaNode) {
+        const { cy } = this
+        
+        if (!areaNode || areaNode.data("type") !== "area") {
+            return
+        }
+
+        const areaId = areaNode.id()
+        const areaData = areaNode.data()
+        const routers = areaData.routers || []
+        const networks = areaData.networks || []
+        // Prefer the backend hierarchy, but fall back to the in_area links
+        // when the data has no child_areas. Child areas are always added as
+        // collapsed area nodes, so opening an area only reveals one level.
+        const childAreas = await this.getChildAreas(areaId)
+        
+        // Remove the area node
+        cy.undoRedo().do("remove", areaNode)
+        
+        // Add direct member nodes (routers and networks)
+        const memberIds = [...routers, ...networks]
+        if (memberIds.length > 0) {
+            const members = memberIds.map(id => ({ id }))
+            await this.showNode(members, false)
+        }
+        
+        // Add child areas as collapsed area nodes with parent reference
+        for (const childAreaId of childAreas) {
+            await this.loadArea(childAreaId, areaId)
+        }
+        
+        // Layout after all members and child areas are on the canvas,
+        // otherwise child areas loaded after showNode pile up at the origin.
+        if (this.options.autolayout && childAreas.length > 0 && cy.elements().length > 0) {
+            this.runLayout()
+        }
+    }
+
+    /**
+     * Collapse all visible objects that belong to an area back into the area node
+     * @param {Object} node - A node that belongs to an area
+     */
+    async collapseToArea(node) {
+        const { cy } = this
+        
+        const areaId = node.data("in_area")
+        if (!areaId) {
+            return
+        }
+
+        // Efficiently collect all descendants of areaId (even if nested areas were expanded).
+        // We use two sources of truth:
+        // 1) Runtime parent links: nodes with data.in_area === <area>
+        // 2) Backend hierarchy: cached child_areas relationships (area -> child areas)
+        const memberIds = new Set()
+        const queue = [areaId]
+
+        // Walk the area tree using cached backend hierarchy.
+        while (queue.length > 0) {
+            const currentArea = queue.shift()
+            const children = await this.getChildAreas(currentArea)
+            for (const child of children) {
+                if (!memberIds.has(child)) {
+                    memberIds.add(child)
+                    queue.push(child)
+                }
+            }
+        }
+
+        // Include any nodes currently shown that belong (directly) to the parent area.
+        // Include nodes shown for any descendant areas too.
+        // Use a map keyed by node id so a collapsed child-area node that is also
+        // a direct member of the parent area is only collected once.
+        const areaMembers = new Map()
+        cy.nodes().forEach(n => {
+            const nArea = n.data("in_area")
+            // routers/networks inside the parent area
+            if (nArea === areaId) areaMembers.set(n.id(), n)
+            // routers/networks inside any descendant area
+            if (nArea && memberIds.has(nArea)) areaMembers.set(n.id(), n)
+            // collapsed child area nodes themselves
+            if (n.data("type") === "area" && memberIds.has(n.id())) areaMembers.set(n.id(), n)
+        })
+        const areaMembersArray = [...areaMembers.values()]
+
+        if (areaMembersArray.length === 0) {
+            return
+        }
+
+        // Calculate center position for area node using Cytoscape collection
+        const areaMembersCollection = cy.collection(areaMembersArray)
+        const boundingBox = areaMembersCollection.boundingBox()
+        const centerPos = {
+            x: (boundingBox.x1 + boundingBox.x2) / 2,
+            y: (boundingBox.y1 + boundingBox.y2) / 2
+        }
+
+        // Find boundary edges (edges connecting area members to external nodes)
+        const boundaryEdges = []
+        areaMembersArray.forEach(member => {
+            member.connectedEdges().forEach(edge => {
+                const source = edge.source()
+                const target = edge.target()
+                
+                // Check if one end is inside the area and the other is outside
+                // A node is "inside" if it's in our areaMembersArray
+                const sourceInArea = areaMembersArray.includes(source)
+                const targetInArea = areaMembersArray.includes(target)
+                
+                if (sourceInArea !== targetInArea) {
+                    // This is a boundary edge
+                    const externalNode = sourceInArea ? target.id() : source.id()
+                    const isTunnel = edge.data("is_tunnel")
+                    
+                    // Avoid duplicates
+                    if (!boundaryEdges.find(e => e.external === externalNode && e.tunnel === isTunnel)) {
+                        boundaryEdges.push({
+                            external: externalNode,
+                            tunnel: isTunnel
+                        })
+                    }
+                }
+            })
+        })
+
+        // Remove all area members (and their edges)
+        cy.undoRedo().do("remove", areaMembersCollection)
+
+        // Load the area node (will fetch fresh data from backend)
+        const areaNode = await this.loadArea(areaId)
+        
+        // Position it at the calculated center
+        if (areaNode) {
+            areaNode.position(centerPos)
+            
+            // Recreate boundary edges to the area node
+            boundaryEdges.forEach(({ external, tunnel }) => {
+                // Skip neighbors that are no longer on the canvas to avoid
+                // cytoscape silently creating empty ghost nodes for them.
+                if (cy.getElementById(external).length === 0) {
+                    return
+                }
+                // Determine source and target based on which node is the area
+                cy.undoRedo().do("add", {
+                    data: {
+                        source: areaId,
+                        target: external,
+                        is_tunnel: tunnel
+                    }
+                })
+                
+                // Add second edge if it's a tunnel
+                if (tunnel) {
+                    cy.undoRedo().do("add", {
+                        data: {
+                            source: areaId,
+                            target: external,
+                            is_tunnel: tunnel
+                        }
+                    })
+                }
+            })
+        }
     }
 
     elementMouseover(element) {
@@ -273,10 +671,18 @@ class Controller {
                 data += (data ? "<br />" : "") + element.data("hosts").length + " Host" +
                     (element.data("hosts").length > 1 ? "s" : "")
 
+            if ( element.data("type") === "area" && element.data("neighbors") ) {
+                let areaNeighbors = element.data("neighbors").filter(n =>
+                    (typeof n === "string" && n.startsWith("area:")) ||
+                    (n && n.id && n.id.startsWith("area:")))
+                if ( areaNeighbors.length > 0 )
+                    data += (data ? "<br />" : "") + areaNeighbors.length + " neighbor area" + (areaNeighbors.length > 1 ? "s" : "")
+            }
+
             if ( element.data("type").startsWith("router") && element.data("neighbors") ) {
                 if ( element.data("type").includes(":") )
                     data += (data ? "<br />" : "") + element.data("type")
-                let interfaces = element.data("neighbors").filter(n => n.id.startsWith("interface:"))
+                let interfaces = element.data("neighbors").filter(n => typeof n === "object" && n.id && n.id.startsWith("interface:"))
                 if ( interfaces.length > 0 )
                     data += (data ? "<br />" : "") + interfaces.length + " Interface" + (interfaces.length > 1 ? "s" : "")
             }

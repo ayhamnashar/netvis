@@ -3,24 +3,40 @@ import { onBeforeUpdate, reactive } from "vue";
 
 const props = defineProps(['cy', 'node', 'controller'])
 let neighbors, hosts
+const sortNeighbors = (a, b) => (b.neighbor_count || 0) - (a.neighbor_count || 0)
+const getNeighbors = (data) => {
+  // Neighbors are either objects ({ id, neighbor_count, ... }) or, for
+  // area nodes, plain id strings (area:/router:/network:).
+  // Keep both so area-to-area neighbors and border objects stay visible
+  // in the info panel.
+  const isNeighborId = (s) => /^(area|router|network):/.test(s) && !s.startsWith("network:tunnel")
+  return (data || []).filter(n =>
+    (typeof n === "string" && isNeighborId(n)) ||
+    (typeof n === "object" && n !== null && n.id !== undefined)
+  )
+}
 if ( props.node.data().neighbors )
-  neighbors = reactive(props.node.data().neighbors.sort((a, b) => b.neighbor_count - a.neighbor_count))
+  neighbors = reactive(getNeighbors(props.node.data().neighbors).sort(sortNeighbors))
+else
+  neighbors = reactive([])
 if ( props.node.data().hosts )
   hosts = reactive(props.node.data().hosts)
 
 onBeforeUpdate(() => {
   if ( props.node.data().neighbors )
-    neighbors = reactive(props.node.data().neighbors.sort((a, b) => b.neighbor_count - a.neighbor_count))
+    neighbors = reactive(getNeighbors(props.node.data().neighbors).sort(sortNeighbors))
+  else
+    neighbors = reactive([])
   if ( props.node.data().hosts )
     hosts = reactive(props.node.data().hosts)
 })
 
 const showAllNeighbors = (neighbors) => {
-  if ( neighbors ) {
-    let neigh = []
-    neighbors.filter(n => !n.id.startsWith("area:")).forEach(n => neigh.push(n))
-    props.controller.showNode(neigh, props.node.data().v6)
-  }
+  props.controller.showAllNeighbors(neighbors, props.node.data().v6)
+}
+
+const collapseToArea = () => {
+  props.controller.collapseToArea(props.node)
 }
 
 </script>
@@ -32,23 +48,38 @@ const showAllNeighbors = (neighbors) => {
       <ul class="node-info-list">
         <li class="clickable" @click="async () => showAllNeighbors(neighbors)">zeige alle</li>
         <template v-for="n in neighbors">
-          <li class="clickable"
-              v-if='!n.id.startsWith("interface") && !n.id.startsWith("network:tunnel") && !n.id.startsWith("area:")'
+          <li v-if='typeof n === "object" && n.id && !n.id.startsWith("interface") && !n.id.startsWith("network:tunnel")'
+              class="clickable"
+              :class="{ 'area-neighbor': n.id.startsWith('area:') }"
               @click="async () => controller.showSingleNode(n.id, node.data().v6)">
             {{ n.id + (cy.getElementById(n.id).length === 1 ? "⋆" : "") }}
+          </li>
+          <li v-else-if='typeof n === "string" && (n.startsWith("area:") || n.startsWith("router:") || n.startsWith("network:"))'
+              class="clickable"
+              :class="{ 'area-neighbor': n.startsWith('area:') }"
+              @click="async () => controller.showSingleNode(n, node.data().v6)">
+            {{ n }}
           </li>
         </template>
       </ul>
     </div>
+    <button
+      v-if="node.data('in_area')"
+      class="collapse-btn"
+      @click="collapseToArea"
+      :title="'Alle Knoten von ' + node.data('in_area') + ' einklappen'"
+    >
+      ▼ Einklappen zu {{ node.data('in_area') }}
+    </button>
   </div>
   <div class="app-node-info right">
     <div class="node-info-name">{{ node.id() }}</div>
     <div class="node-info-body"
-         v-if='node.data("hosts") || node.data("neighbors").filter(n => n.id.startsWith("interface:")).length > 0'>
+         v-if='node.data("hosts") || getNeighbors(node.data("neighbors")).filter(n => typeof n === "object" && n.id && n.id.startsWith("interface:")).length > 0'>
       <ul class="node-info-list">
         <template v-for="n in neighbors">
           <li
-              v-if='n.id.startsWith("interface")'
+              v-if='typeof n === "object" && n.id && n.id.startsWith("interface")'
           >{{ n.id }}
           </li>
         </template>
@@ -110,6 +141,28 @@ const showAllNeighbors = (neighbors) => {
       -webkit-user-select: none;
       user-select: none;
     }
+
+    .area-neighbor {
+      font-style: italic;
+      color: #b8f0b8;
+    }
+  }
+}
+
+.collapse-btn {
+  display: block;
+  margin-top: 0.5em;
+  width: 100%;
+  background-color: #2a6e2a;
+  color: #fff;
+  border: 1px dashed #00cc00;
+  border-radius: 4px;
+  padding: 0.3em 0.5em;
+  cursor: pointer;
+  font-size: 0.95em;
+
+  &:hover {
+    background-color: #1e4f1e;
   }
 }
 </style>

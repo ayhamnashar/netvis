@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from "vue";
+import { ref, computed, nextTick, onBeforeUnmount, onMounted } from "vue";
 
 const props = defineProps({
   node: {
@@ -19,10 +19,149 @@ const node = ref(props.node)
 const path = ref(props.path)
 const style = "width: " + (initName ? "49%" : "100%")
 const title = import.meta.env.VITE_APP_TITLE
+const objectNames = ref([])
+const showSuggestions = ref(false)
+const highlightedIndex = ref(-1)
+const suggestionList = ref(null)
+const fieldRow = ref(null)
+// Text currently typed into the object field. It starts empty even when
+// the loader is opened with a default object, so that default is only a
+// placeholder and the user can start typing immediately.
+const query = ref("")
+
+const suggestions = computed(() => {
+  const term = query.value.trim().toLowerCase()
+  if ( !term ) return []
+  const matching = objectNames.value.filter(name =>
+    !name.startsWith("network:tunnel") && name.toLowerCase().includes(term)
+  )
+  matching.sort((a, b) => {
+    const al = a.toLowerCase()
+    const bl = b.toLowerCase()
+    const aPrefix = al.startsWith(term)
+    const bPrefix = bl.startsWith(term)
+    if ( aPrefix !== bPrefix ) return aPrefix ? -1 : 1
+    return al.localeCompare(bl)
+  })
+  return matching.slice(0, 100)
+})
+
+const suggestionsOpen = computed(() =>
+  showSuggestions.value && suggestions.value.length > 0
+)
+
+onMounted(async () => {
+  // Fetch routers, networks and areas for autocomplete.
+  try {
+    const response = await fetch("/netvis/backend/names")
+    if (response.ok) {
+      objectNames.value = await response.json()
+    }
+  } catch (err) {
+    console.error("Failed to fetch object names:", err)
+  }
+})
+
+onMounted(() => {
+  // Close the list when clicking outside of the field. This avoids hiding
+  // it on blur, which would break dragging the suggestion scrollbar.
+  document.addEventListener("pointerdown", onDocumentPointerDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown)
+})
+
+function typeOf(name) {
+  if ( name.startsWith("area:") ) return "Bereich"
+  if ( name.startsWith("router:") ) return "Router"
+  if ( name.startsWith("network:") ) return "Netzwerk"
+  return ""
+}
+
+function onNameInput(event) {
+  query.value = event.target.value
+  node.value.name = query.value
+  showSuggestions.value = true
+  highlightedIndex.value = -1
+  nextTick(() => {
+    if ( suggestionList.value ) suggestionList.value.scrollTop = 0
+  })
+}
+
+function onNameFocus() {
+  if ( suggestions.value.length > 0 ) {
+    showSuggestions.value = true
+  }
+}
+
+function hideSuggestions() {
+  showSuggestions.value = false
+  highlightedIndex.value = -1
+}
+
+function onDocumentPointerDown(event) {
+  if ( fieldRow.value && !fieldRow.value.contains(event.target) ) {
+    hideSuggestions()
+  }
+}
+
+function onSuggestionPointerDown(event, name) {
+  // Select immediately for mouse/pen and keep focus in the input. Touches
+  // are handled by click so that swiping can still scroll the list.
+  if ( event.pointerType === "mouse" || event.pointerType === "pen" ) {
+    event.preventDefault()
+    selectSuggestion(name)
+  }
+}
+
+function scrollHighlightedIntoView() {
+  nextTick(() => {
+    const list = suggestionList.value
+    if ( !list ) return
+    const item = list.children[highlightedIndex.value]
+    if ( !item ) return
+    const top = item.offsetTop
+    const bottom = top + item.offsetHeight
+    if ( top < list.scrollTop ) {
+      list.scrollTop = top
+    } else if ( bottom > list.scrollTop + list.clientHeight ) {
+      list.scrollTop = bottom - list.clientHeight
+    }
+  })
+}
+
+function selectSuggestion(name) {
+  query.value = name
+  node.value.name = name
+  showSuggestions.value = false
+  highlightedIndex.value = -1
+}
+
+function onNameKeydown(event) {
+  if ( !showSuggestions.value || suggestions.value.length === 0 ) return
+  if ( event.key === "ArrowDown" ) {
+    event.preventDefault()
+    highlightedIndex.value = (highlightedIndex.value + 1) % suggestions.value.length
+    scrollHighlightedIntoView()
+  } else if ( event.key === "ArrowUp" ) {
+    event.preventDefault()
+    highlightedIndex.value = highlightedIndex.value <= 0
+      ? suggestions.value.length - 1
+      : highlightedIndex.value - 1
+    scrollHighlightedIntoView()
+  } else if ( event.key === "Escape" || event.key === "Tab" ) {
+    hideSuggestions()
+  } else if ( event.key === "Enter" && highlightedIndex.value >= 0 ) {
+    event.preventDefault()
+    selectSuggestion(suggestions.value[highlightedIndex.value])
+  }
+}
 
 
 function submitHandler() {
-  if ( node.value.name === "" ) node.value.name = initName
+  node.value.name = query.value || initName
+  hideSuggestions()
   console.log("Submit ", node.value, path.value)
   emit('submitted', node.value, path.value)
 }
@@ -49,15 +188,37 @@ function onFileChanged(event) {
       <form @submit.prevent="submitHandler">
         <div class="title">{{ title }}</div>
         <div class="inputContainer">
-          <input type="text" :placeholder="node.name || initName" @input="e => node.name = e.target.value" class="input"
-                 id="object"/>
-          <div class="cut"></div>
-          <label for="object" class="placeholder">Netspoc-Objekt</label>
+          <div class="fieldRow" ref="fieldRow">
+            <input type="text" :value="query" :placeholder="initName"
+                   @input="onNameInput" @focus="onNameFocus"
+                   @keydown="onNameKeydown" class="input" id="object"
+                   role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
+                   aria-controls="object-suggestions"
+                   :aria-expanded="suggestionsOpen ? 'true' : 'false'"
+                   :aria-activedescendant="highlightedIndex >= 0 ? 'object-suggestion-' + highlightedIndex : undefined"
+                   autocomplete="off" spellcheck="false"/>
+            <div class="cut"></div>
+            <label for="object" class="placeholder">Netspoc-Objekt</label>
+            <ul class="suggestions" id="object-suggestions" role="listbox"
+                aria-label="Netspoc-Objekte" ref="suggestionList" v-if="suggestionsOpen">
+              <li v-for="(suggestion, i) in suggestions" :key="suggestion"
+                  :id="'object-suggestion-' + i" role="option"
+                  :aria-selected="i === highlightedIndex ? 'true' : 'false'"
+                  :class="{ highlighted: i === highlightedIndex }"
+                  @pointerdown="onSuggestionPointerDown($event, suggestion)"
+                  @click="selectSuggestion(suggestion)"
+                  @mouseenter="highlightedIndex = i">
+                <span class="suggestion-name">{{ suggestion }}</span>
+                <span class="suggestion-type">{{ typeOf(suggestion) }}</span>
+              </li>
+            </ul>
+          </div>
           <label class="switch">
             <input type="checkbox" v-model="node.v6" id="v6" class="hidden"/>
             <span class="slider round"/>
             <p>IPv6</p>
           </label>
+          
           <input type="text" class="input" id="source" style="width: 49%" :placeholder="path.source"
                  v-if="initName" @input="e => path.source = e.target.value"/>
           <input type="text" class="input" id="destination" style="width: 49%; margin-left: 5px;"
@@ -82,9 +243,11 @@ function onFileChanged(event) {
   background-color: #cecece;
   box-shadow: 0 0 5px #ff4212;
   border-radius: 5px;
-  padding: 0 10px 120px;
+  padding: 0 10px 18px;
   z-index: 10;
-  height: 340px;
+  height: auto;
+  width: min(720px, calc(100vw - 24px));
+  overflow: visible;
 }
 
 .title {
@@ -100,9 +263,14 @@ function onFileChanged(event) {
 }
 
 .inputContainer {
+  width: 100%;
+}
+
+.fieldRow {
   height: 50px;
   position: relative;
   width: 100%;
+  margin-bottom: 14px;
 }
 
 .input {
@@ -112,7 +280,7 @@ function onFileChanged(event) {
   box-sizing: border-box;
   color: #eee;
   font-size: 18px;
-  height: 100%;
+  height: 50px;
   outline: 0;
   padding: 4px 20px 0;
   width: 100%;
@@ -186,13 +354,64 @@ function onFileChanged(event) {
   width: 49%;
 }
 
+/* Autocomplete suggestions for the object name field */
+.suggestions {
+  position: absolute;
+  top: 50px;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background-color: #303245;
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.suggestions li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  color: #eee;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.suggestions li.highlighted,
+.suggestions li:hover {
+  background-color: var(--buttonActiveColor);
+}
+
+.suggestion-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-type {
+  color: #aab3c0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .switch {
   position: relative;
   display: grid;
-  grid-template-columns: 230px 64px;
+  grid-template-columns: 1fr 64px;
   grid-template-rows: 34px;
   grid-template-areas: "ipv6 switch";
   margin-top: 5px;
+  align-items: center;
 }
 
 /* Hide default HTML checkbox */
@@ -254,9 +473,9 @@ input:checked + .slider:before {
 .switch p {
   height: 30px;
   display: flex;
-  justify-content: right;
+  justify-content: flex-end;
   bottom: 0;
-  margin-right: 1em;
+  margin-right: 0;
   align-items: center;
   grid-area: ipv6;
 }

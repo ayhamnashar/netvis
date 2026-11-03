@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -20,6 +21,7 @@ var dataPath, netspocPath string
 type objects struct {
 	Network map[string]json.RawMessage `json:"network"`
 	Router  map[string]json.RawMessage `json:"router"`
+	Area    map[string]json.RawMessage `json:"area"`
 }
 
 var data *objects
@@ -32,6 +34,8 @@ func getObject(name string) (json.RawMessage, error) {
 		field = data.Router
 	case "network":
 		field = data.Network
+	case "area":
+		field = data.Area
 	default:
 		return nil, errors.New(fmt.Sprintf("Unsupported Type \"%s\"", obj[0]))
 	}
@@ -76,6 +80,35 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%v", outb.String())
 }
 
+func areasHandler(w http.ResponseWriter, r *http.Request) {
+	// Return list of all area names
+	areaNames := make([]string, 0, len(data.Area))
+	for areaName := range data.Area {
+		areaNames = append(areaNames, areaName)
+	}
+	sort.Strings(areaNames)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(areaNames)
+}
+
+func namesHandler(w http.ResponseWriter, r *http.Request) {
+	// Return the ids of all routers, networks and areas, used for
+	// autocomplete in the object loader.
+	names := make([]string, 0, len(data.Router)+len(data.Network)+len(data.Area))
+	for name := range data.Router {
+		names = append(names, name)
+	}
+	for name := range data.Network {
+		names = append(names, name)
+	}
+	for name := range data.Area {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(names)
+}
+
 func loadObjectsFromFile() {
 	//content, err := os.ReadFile(path.Join(dataPath, "objects.json"))
 	file := path.Join(dataPath, "objects.json")
@@ -91,8 +124,10 @@ func loadObjectsFromFile() {
 		fmt.Fprintln(os.Stderr, errors.New(fmt.Sprintf("Error decoding %s: %v", file, err)))
 		os.Exit(1)
 	}
+
 	data = newData
-	log.Print("Loaded Objects from ", file)
+	log.Printf("Loaded Objects from %s (%d routers, %d networks, %d areas)",
+		file, len(data.Router), len(data.Network), len(data.Area))
 }
 
 func main() {
@@ -121,6 +156,8 @@ func main() {
 
 	http.HandleFunc("/get", getHandler)
 	http.HandleFunc("/path", pathHandler)
+	http.HandleFunc("/areas", areasHandler)
+	http.HandleFunc("/names", namesHandler)
 	log.Printf("Listening on %s:%s", listenaddress, listenport)
 	log.Fatal(http.ListenAndServe(listenaddress+":"+listenport, nil))
 }

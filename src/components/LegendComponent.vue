@@ -6,6 +6,7 @@
     <p class="managed-router">Managed Router</p>
     <p class="unmanaged-router">Unmanaged Router</p>
     <p class="network">Network</p>
+    <p class="area">Area</p>
   </div>
 </template>
 
@@ -48,6 +49,9 @@
   background-color: rgba(0, 0, 255, 0.5);
 }
 
+.area {
+  background-color: rgba(0, 128, 0, 0.5);
+}
 p {
   margin: 0.5em;
   padding: 0.5em;
