@@ -5,14 +5,12 @@ class Controller {
     constructor({ cy }) {
         this.cy = cy
         this.bus = new EventEmitter()
-        // Cache of areaId -> child areaIds as provided by the backend.
-        // Used to collapse parent areas efficiently even if nested areas were expanded.
+        // Cache: areaId -> child areaIds from the backend, used for efficient collapse.
         this.areaChildrenCache = new Map()
         // Cache of raw area objects fetched from the backend.
         this.areaDataCache = new Map()
-        // areaId -> child areaIds, derived from the in_area links of all
-        // areas. Built lazily for backend data that doesn't provide
-        // child_areas (older exports, hand-written topologies).
+        // areaId -> child areaIds derived from in_area links; built lazily
+        // when the backend lacks child_areas.
         this.areaHierarchy = null
         this.options = {
             autolayout: true,
@@ -21,10 +19,8 @@ class Controller {
     }
 
     /**
-     * Return child areas for an areaId.
-     * Uses the child_areas reported by the backend and, as a fallback,
-     * derives them from the in_area links of all areas fetched from the
-     * backend. Falls back to fetching the area from the backend if needed.
+     * Return child areas of areaId, merging backend child_areas with the
+     * in_area hierarchy.
      * @param {string} areaId
      * @returns {Promise<string[]>}
      */
@@ -37,10 +33,8 @@ class Controller {
     }
 
     /**
-     * Build (once) a map of areaId -> child areaIds from the in_area links
-     * of every area known to the backend. This makes netvis work with
-     * backend data that doesn't include child_areas, e.g. hand-written
-     * topologies or exports from older Netspoc versions.
+     * Build (once) areaId -> child areaIds from in_area links, so data
+     * without child_areas still works.
      * @returns {Promise<Map<string, string[]>>}
      */
     async getAreaHierarchy() {
@@ -61,8 +55,8 @@ class Controller {
                     areaData = await this.getDataFromBackend(name, false)
                     this.areaDataCache.set(name, areaData)
                 } catch {
-                    // Do not cache failures: a transient backend error must
-                    // not permanently prevent the hierarchy from resolving.
+                    // Do not cache failures; a transient error must not block
+                    // later resolution.
                     return
                 }
             }
@@ -147,9 +141,8 @@ class Controller {
         let areas = []
         neighbors.forEach(n => {
             if ( typeof n === "string" ) {
-                // Area nodes report their neighbors as plain id strings.
-                // Areas are loaded as collapsed area nodes, everything else
-                // (networks, routers) as regular nodes.
+                // Area neighbors are plain ids; load areas collapsed, other
+                // objects as regular nodes.
                 if ( n.startsWith("area:") ) {
                     areas.push(n)
                 } else {
@@ -368,10 +361,8 @@ class Controller {
     nodeCxtTap(node) {
         const { cy } = this
         const selected = cy.elements(':selected')
-        // A right click targets one object. Only remove other selected
-        // objects if the clicked node is part of an explicit multi-selection.
-        // Otherwise the node that was auto-selected by the last "add"
-        // operation would be removed together with the clicked object.
+        // A right click removes the clicked object. Remove other selected
+        // nodes only if the click is part of an explicit multi-selection.
         if ( node.selected() && selected.length > 1 ) {
             cy.undoRedo().do("remove", selected)
         } else {
@@ -427,14 +418,12 @@ class Controller {
                 label: areaId
             }
 
-            // Boundary routers (from border/inclusive_border interfaces) are
-            // the routers connecting the area to neighboring areas. The
-            // backend already reports them for border-only areas, so only
-            // add the missing ones (e.g. routers behind inclusive borders)
-            // to avoid duplicates in the info panel, "zeige alle" and edges.
+            // Routers at border interfaces lie outside the area and connect
+            // it to neighbors; routers at inclusive_border interfaces are
+            // area members and must not be shown as external neighbors.
             const boundaryRouters = []
             const seenRouters = new Set()
-            ;[...(areaData.border || []), ...(areaData.inclusive_border || [])].forEach(intf => {
+            ;(areaData.border || []).forEach(intf => {
                 const m = /^interface:([^.]+)\./.exec(intf)
                 if ( !m ) return
                 const routerId = "router:" + m[1]
@@ -456,9 +445,8 @@ class Controller {
                 nodeData.in_area = parentAreaId
             }
 
-            // Cache child areas for efficient collapse later. If the backend
-            // data doesn't provide child_areas, derive them from the in_area
-            // hierarchy so nested areas still show up when this area is opened.
+            // Cache child areas for collapse. If the backend lacks
+            // child_areas, derive them from the in_area hierarchy.
             let childAreas = nodeData.child_areas || []
             if (childAreas.length === 0) {
                 const hierarchy = await this.getAreaHierarchy()
@@ -503,9 +491,8 @@ class Controller {
         const areaData = areaNode.data()
         const routers = areaData.routers || []
         const networks = areaData.networks || []
-        // Prefer the backend hierarchy, but fall back to the in_area links
-        // when the data has no child_areas. Child areas are always added as
-        // collapsed area nodes, so opening an area only reveals one level.
+        // Prefer backend child_areas. Child areas are added collapsed, so
+        // expanding an area reveals only one level.
         const childAreas = await this.getChildAreas(areaId)
         
         // Remove the area node
@@ -542,10 +529,8 @@ class Controller {
             return
         }
 
-        // Efficiently collect all descendants of areaId (even if nested areas were expanded).
-        // We use two sources of truth:
-        // 1) Runtime parent links: nodes with data.in_area === <area>
-        // 2) Backend hierarchy: cached child_areas relationships (area -> child areas)
+        // Collect all descendants of areaId from two sources: runtime
+        // in_area links and the cached backend hierarchy.
         const memberIds = new Set()
         const queue = [areaId]
 
@@ -561,10 +546,8 @@ class Controller {
             }
         }
 
-        // Include any nodes currently shown that belong (directly) to the parent area.
-        // Include nodes shown for any descendant areas too.
-        // Use a map keyed by node id so a collapsed child-area node that is also
-        // a direct member of the parent area is only collected once.
+        // Collect direct members, descendants and collapsed child-area nodes,
+        // keyed by id so each node is collected once.
         const areaMembers = new Map()
         cy.nodes().forEach(n => {
             const nArea = n.data("in_area")
@@ -596,8 +579,7 @@ class Controller {
                 const source = edge.source()
                 const target = edge.target()
                 
-                // Check if one end is inside the area and the other is outside
-                // A node is "inside" if it's in our areaMembersArray
+                // A boundary edge has exactly one endpoint in areaMembersArray.
                 const sourceInArea = areaMembersArray.includes(source)
                 const targetInArea = areaMembersArray.includes(target)
                 
@@ -620,7 +602,7 @@ class Controller {
         // Remove all area members (and their edges)
         cy.undoRedo().do("remove", areaMembersCollection)
 
-        // Load the area node (will fetch fresh data from backend)
+        // Load the collapsed area node.
         const areaNode = await this.loadArea(areaId)
         
         // Position it at the calculated center
@@ -634,7 +616,7 @@ class Controller {
                 if (cy.getElementById(external).length === 0) {
                     return
                 }
-                // Determine source and target based on which node is the area
+                // Connect the area node to the external node.
                 cy.undoRedo().do("add", {
                     data: {
                         source: areaId,

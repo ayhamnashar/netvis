@@ -5,10 +5,9 @@ const props = defineProps(['cy', 'node', 'controller'])
 let neighbors, hosts
 const sortNeighbors = (a, b) => (b.neighbor_count || 0) - (a.neighbor_count || 0)
 const getNeighbors = (data) => {
-  // Neighbors are either objects ({ id, neighbor_count, ... }) or, for
-  // area nodes, plain id strings (area:/router:/network:).
-  // Keep both so area-to-area neighbors and border objects stay visible
-  // in the info panel.
+  // Neighbors are objects ({ id, neighbor_count, ... }) or, for areas,
+  // plain id strings. Keep both so area-to-area neighbors and border
+  // objects stay visible.
   const isNeighborId = (s) => /^(area|router|network):/.test(s) && !s.startsWith("network:tunnel")
   return (data || []).filter(n =>
     (typeof n === "string" && isNeighborId(n)) ||

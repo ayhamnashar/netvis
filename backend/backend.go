@@ -81,7 +81,7 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func areasHandler(w http.ResponseWriter, r *http.Request) {
-	// Return list of all area names
+	// Return all area names.
 	areaNames := make([]string, 0, len(data.Area))
 	for areaName := range data.Area {
 		areaNames = append(areaNames, areaName)
@@ -92,8 +92,8 @@ func areasHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func namesHandler(w http.ResponseWriter, r *http.Request) {
-	// Return the ids of all routers, networks and areas, used for
-	// autocomplete in the object loader.
+	// Return ids of all routers, networks and areas for the object loader's
+	// autocomplete.
 	names := make([]string, 0, len(data.Router)+len(data.Network)+len(data.Area))
 	for name := range data.Router {
 		names = append(names, name)

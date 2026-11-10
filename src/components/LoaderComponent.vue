@@ -24,9 +24,8 @@ const showSuggestions = ref(false)
 const highlightedIndex = ref(-1)
 const suggestionList = ref(null)
 const fieldRow = ref(null)
-// Text currently typed into the object field. It starts empty even when
-// the loader is opened with a default object, so that default is only a
-// placeholder and the user can start typing immediately.
+// Text typed into the object field. Starts empty even with a default
+// object, so the default acts as a placeholder.
 const query = ref("")
 
 const suggestions = computed(() => {
@@ -63,8 +62,8 @@ onMounted(async () => {
 })
 
 onMounted(() => {
-  // Close the list when clicking outside of the field. This avoids hiding
-  // it on blur, which would break dragging the suggestion scrollbar.
+  // Close the list on outside click; hiding on blur would break dragging
+  // the suggestion scrollbar.
   document.addEventListener("pointerdown", onDocumentPointerDown)
 })
 
@@ -107,8 +106,8 @@ function onDocumentPointerDown(event) {
 }
 
 function onSuggestionPointerDown(event, name) {
-  // Select immediately for mouse/pen and keep focus in the input. Touches
-  // are handled by click so that swiping can still scroll the list.
+  // Select immediately for mouse/pen and keep focus; touches use click so
+  // swiping can still scroll.
   if ( event.pointerType === "mouse" || event.pointerType === "pen" ) {
     event.preventDefault()
     selectSuggestion(name)
