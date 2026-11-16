@@ -249,13 +249,64 @@ class Controller {
     }
 
     removeCollapsedAreaForNode(nodeData) {
-        const areaId = nodeData.in_area
-        if ( !areaId ) return false
+        return this.removeCollapsedAncestorAreas(nodeData.in_area)
+    }
 
-        const areaNode = this.cy.getElementById(areaId)
-        if ( areaNode.length === 0 || areaNode.data("type") !== "area" ) return false
+    /**
+     * Remove collapsed area nodes that enclose the given area.
+     * @param {string} areaId - in_area of the node to show
+     * @returns {boolean} true if a node was removed
+     */
+    removeCollapsedAncestorAreas(areaId) {
+        const { cy } = this
+        let removed = false
+        while ( areaId ) {
+            const areaNode = cy.getElementById(areaId)
+            let parentId
+            if ( areaNode.length > 0 && areaNode.data("type") === "area" ) {
+                parentId = areaNode.data("in_area")
+                cy.undoRedo().do("remove", areaNode)
+                removed = true
+            }
+            // The parent of an off-canvas area is only known from cache.
+            const areaData = this.areaDataCache.get(areaId)
+            areaId = areaData ? areaData.in_area : parentId
+        }
+        return removed
+    }
 
-        this.cy.undoRedo().do("remove", areaNode)
+    /**
+     * Return areaId and the ids of all areas nested in it.
+     * @param {string} areaId
+     * @returns {Promise<Set<string>>}
+     */
+    async getAreaSubtree(areaId) {
+        const areaIds = new Set([areaId])
+        const queue = [areaId]
+        while ( queue.length > 0 ) {
+            const currentArea = queue.shift()
+            const children = await this.getChildAreas(currentArea)
+            for ( const child of children ) {
+                if ( areaIds.has(child) ) continue
+                areaIds.add(child)
+                queue.push(child)
+            }
+        }
+        return areaIds
+    }
+
+    /**
+     * Remove all nodes inside the given area, including nested areas.
+     * @param {string} areaId
+     * @returns {Promise<boolean>} true if a node was removed
+     */
+    async removeInnerObjects(areaId) {
+        const { cy } = this
+        const areaIds = await this.getAreaSubtree(areaId)
+        const innerObjects = cy.nodes().filter(n => areaIds.has(n.data("in_area")))
+        if ( innerObjects.length === 0 ) return false
+
+        cy.undoRedo().do("remove", innerObjects)
         return true
     }
 
@@ -398,8 +449,12 @@ class Controller {
         
         // Check if area already exists
         if (cy.getElementById(areaId).length > 0) {
-            this.nodeSelect(cy.getElementById(areaId))
-            return cy.getElementById(areaId)
+            const existingArea = cy.getElementById(areaId)
+            // Keep the collapsed area consistent with its surroundings.
+            await this.removeInnerObjects(areaId)
+            this.removeCollapsedAncestorAreas(existingArea.data("in_area"))
+            this.nodeSelect(existingArea)
+            return existingArea
         }
 
         // Fetch area data from backend (or use the cached copy)
@@ -456,6 +511,11 @@ class Controller {
                 }
             }
             this.areaChildrenCache.set(areaId, childAreas)
+            
+            // Loading an area collapses it: drop visible inner objects and
+            // enclosing area nodes before adding the area node.
+            await this.removeInnerObjects(areaId)
+            this.removeCollapsedAncestorAreas(nodeData.in_area)
             
             // Add area node to graph
             const areaNode = cy.undoRedo().do("add", { 
@@ -529,34 +589,16 @@ class Controller {
             return
         }
 
-        // Collect all descendants of areaId from two sources: runtime
-        // in_area links and the cached backend hierarchy.
-        const memberIds = new Set()
-        const queue = [areaId]
-
-        // Walk the area tree using cached backend hierarchy.
-        while (queue.length > 0) {
-            const currentArea = queue.shift()
-            const children = await this.getChildAreas(currentArea)
-            for (const child of children) {
-                if (!memberIds.has(child)) {
-                    memberIds.add(child)
-                    queue.push(child)
-                }
-            }
-        }
-
-        // Collect direct members, descendants and collapsed child-area nodes,
-        // keyed by id so each node is collected once.
+        // Collect the area's direct members, nested members and collapsed
+        // child area nodes, keyed by id so each node is collected once.
+        const memberIds = await this.getAreaSubtree(areaId)
         const areaMembers = new Map()
         cy.nodes().forEach(n => {
+            if ( n.id() === areaId ) return
             const nArea = n.data("in_area")
-            // routers/networks inside the parent area
-            if (nArea === areaId) areaMembers.set(n.id(), n)
-            // routers/networks inside any descendant area
-            if (nArea && memberIds.has(nArea)) areaMembers.set(n.id(), n)
-            // collapsed child area nodes themselves
-            if (n.data("type") === "area" && memberIds.has(n.id())) areaMembers.set(n.id(), n)
+            const nested = nArea && memberIds.has(nArea)
+            const childArea = n.data("type") === "area" && memberIds.has(n.id())
+            if ( nested || childArea ) areaMembers.set(n.id(), n)
         })
         const areaMembersArray = [...areaMembers.values()]
 
