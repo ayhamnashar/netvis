@@ -217,7 +217,6 @@ function onFileChanged(event) {
             <span class="slider round"/>
             <p>IPv6</p>
           </label>
-          
           <input type="text" class="input" id="source" style="width: 49%" :placeholder="path.source"
                  v-if="initName" @input="e => path.source = e.target.value"/>
           <input type="text" class="input" id="destination" style="width: 49%; margin-left: 5px;"
@@ -242,11 +241,8 @@ function onFileChanged(event) {
   background-color: #cecece;
   box-shadow: 0 0 5px #ff4212;
   border-radius: 5px;
-  padding: 0 10px 18px;
+  padding: 0 10px 20px;
   z-index: 10;
-  height: auto;
-  width: min(720px, calc(100vw - 24px));
-  overflow: visible;
 }
 
 .title {
@@ -262,6 +258,7 @@ function onFileChanged(event) {
 }
 
 .inputContainer {
+  position: relative;
   width: 100%;
 }
 
@@ -269,7 +266,11 @@ function onFileChanged(event) {
   height: 50px;
   position: relative;
   width: 100%;
-  margin-bottom: 14px;
+  margin-top: 10px;
+}
+
+.inputContainer > .input {
+  margin: 10px 0 0 0;
 }
 
 .input {
@@ -338,7 +339,7 @@ function onFileChanged(event) {
   cursor: pointer;
   font-size: 18px;
   height: 50px;
-  margin-top: 5px;
+  margin-top: 10px;
   text-align: center;
 }
 
@@ -406,11 +407,10 @@ function onFileChanged(event) {
 .switch {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr 64px;
+  grid-template-columns: 230px 64px;
   grid-template-rows: 34px;
   grid-template-areas: "ipv6 switch";
   margin-top: 5px;
-  align-items: center;
 }
 
 /* Hide default HTML checkbox */
@@ -472,9 +472,9 @@ input:checked + .slider:before {
 .switch p {
   height: 30px;
   display: flex;
-  justify-content: flex-end;
+  justify-content: right;
   bottom: 0;
-  margin-right: 0;
+  margin-right: 1em;
   align-items: center;
   grid-area: ipv6;
 }
