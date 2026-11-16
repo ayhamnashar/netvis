@@ -19,7 +19,7 @@ export default defineConfig({
     server: {
         proxy: {
             '/netvis/backend': {
-                target: 'http://localhost:5043',
+                target: 'http://localhost:5042',
                 rewrite: path => path.replace(/^\/netvis\/backend/, '')
             }
         }
